@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 
 from typing import Callable, Iterable, TYPE_CHECKING
 
@@ -38,6 +39,14 @@ class LlamaModel(TextModel):
         else:
             hparams = ModelBase.load_hparams(self.dir_model, is_mistral_format=False)
             self.origin_hf_arch = hparams.get('architectures', [None])[0]
+        # MTP/NextN head support: extend block_count so tensor_map allocates slots
+        # for the trailing nextn-style layer(s). Tensors are remapped from `mtp.*`
+        # to `model.layers.{n_layer + bid}.{...}` in modify_tensors.
+        if not self.no_mtp:
+            n_mtp = self.hparams.get("mtp_num_hidden_layers", 0)
+            if n_mtp > 0:
+                self.block_count += n_mtp
+                self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
 
     def set_vocab(self):
         if self.origin_hf_arch == "GlmasrModel":
@@ -96,6 +105,11 @@ class LlamaModel(TextModel):
             rope_dim = hparams["hidden_size"] // hparams["num_attention_heads"]
         self.gguf_writer.add_rope_dimension_count(rope_dim)
 
+        if not self.no_mtp:
+            n_mtp = hparams.get("mtp_num_hidden_layers", 0)
+            if n_mtp > 0:
+                self.gguf_writer.add_nextn_predict_layers(n_mtp)
+
     @staticmethod
     def permute(weights: Tensor, n_head: int, n_head_kv: int | None):
         if n_head_kv is not None and n_head != n_head_kv:
@@ -127,11 +141,48 @@ class LlamaModel(TextModel):
         if "text_model." in name:
             name = name.replace("text_model.", "") # for SmolVLM
 
+        # MTP-only export: keep mtp.* plus shared embed/norm/head (needed by the head).
+        # no-mtp export: drop mtp.* entirely.
+        if name.startswith("mtp."):
+            if cls.no_mtp:
+                return None
+            return (name, gen)
+        if cls.mtp_only:
+            canonical = name.replace("language_model.", "")
+            keep = canonical in (
+                "model.embed_tokens.weight", "model.norm.weight", "lm_head.weight",
+                "embed_tokens.weight", "norm.weight",
+            )
+            if not keep:
+                return None
+
         return super().filter_tensors((name, gen))
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         n_head = self.find_hparam(["n_heads", "num_attention_heads"])
         n_kv_head = self.find_hparam(["n_kv_heads", "num_key_value_heads"])
+
+        # MTP/NextN tensors: remap `mtp.*` to `model.layers.{n_layer + bid}.*`
+        # so the standard tensor_map handles them (eh_proj, enorm, hnorm, shared_head.norm).
+        if name.startswith("mtp."):
+            n_layer = self.hparams["num_hidden_layers"]
+            if name.find("layers.") != -1:
+                assert bid is not None
+                name = name.replace(f"mtp.layers.{bid}", f"model.layers.{bid + n_layer}")
+                bid = bid + n_layer
+            else:
+                remapper = {
+                    "mtp.fc":                    "model.layers.{bid}.eh_proj",
+                    "mtp.pre_fc_norm_embedding": "model.layers.{bid}.enorm",
+                    "mtp.pre_fc_norm_hidden":    "model.layers.{bid}.hnorm",
+                    "mtp.norm":                  "model.layers.{bid}.shared_head.norm",
+                }
+                stem   = Path(name).stem
+                suffix = Path(name).suffix
+                tmpl   = remapper[stem] + suffix
+                for b in range(n_layer, self.block_count):
+                    yield from super().modify_tensors(data_torch, tmpl.format(bid=b), b)
+                return
 
         if self.hf_arch == "LlamaModel":
             name = "model." + name

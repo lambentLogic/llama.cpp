@@ -248,8 +248,17 @@ def main() -> None:
         if args.mtp or args.no_mtp:
             from conversion.qwen import _Qwen35MtpMixin
             if not issubclass(model_class, _Qwen35MtpMixin):
-                logger.error("--mtp / --no-mtp are only supported for Qwen3.5/3.6 text variants today")
-                sys.exit(1)
+                logger.warning(
+                    f"Applying _Qwen35MtpMixin to {model_class.__name__} dynamically "
+                    f"(non-Qwen3.5 model with MTP tensors)."
+                )
+                # Copy model_arch from parent to satisfy __init_subclass__ checks.
+                parent_arch = getattr(model_class, "model_arch", None)
+                model_class = type(
+                    f"Mtp_{model_class.__name__}",
+                    (_Qwen35MtpMixin, model_class),
+                    {"model_arch": parent_arch} if parent_arch is not None else {},
+                )
             if args.no_mtp:
                 model_class.no_mtp = True
             if args.mtp:

@@ -2057,6 +2057,14 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     if (mtp_on_hybrid_qwen35) {
                         const uint32_t n_main = hparams.n_layer - hparams.nextn_predict_layers;
                         filter = [n_main](int32_t il) { return (uint32_t)il >= n_main; };
+                    } else if (params.ctx_type == LLAMA_CONTEXT_TYPE_MTP &&
+                               arch == LLM_ARCH_LLAMA &&
+                               hparams.nextn_predict_layers > 0) {
+                        // Llama-arch MTP draft head: only the trailing nextn block(s) own a KV
+                        // cache; the trunk layers exist in layers[] only to host their nextn
+                        // tensors and are not executed in this graph.
+                        const uint32_t n_main = hparams.n_layer - hparams.nextn_predict_layers;
+                        filter = [n_main](int32_t il) { return (uint32_t)il >= n_main; };
                     }
 
                     if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
