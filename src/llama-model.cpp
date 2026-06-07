@@ -2145,6 +2145,15 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         }
                     }
 
+                    // Llama-arch MTP draft head: only the trailing nextn block(s) own a KV
+                    // cache in the MTP context; the trunk layers exist in layers[] only to
+                    // host their tensors and are not executed in this graph.
+                    if (arch == LLM_ARCH_LLAMA &&
+                        hparams.n_layer_nextn > 0 &&
+                        params.ctx_type == LLAMA_CONTEXT_TYPE_MTP) {
+                        filter = [&](uint32_t il) { return il >= hparams.n_layer(); };
+                    }
+
                     if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
                         GGML_ASSERT(hparams.is_swa_any());
 
