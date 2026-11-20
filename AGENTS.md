@@ -108,3 +108,17 @@ To conserve context space, load these resources as needed:
 - [Jinja engine](common/jinja/README.md)
 - [How to add a new model](docs/development/HOWTO-add-model.md)
 - [PR template](.github/pull_request_template.md)
+
+---
+
+## npm supply chain security notice (Aug 2026)
+
+`tools/ui` has transitive dependencies on the keyv/caching package family that was compromised in the Aug 4, 2026 "Shai-Hulud" npm supply chain attack. The currently installed versions are safe and predate the attack:
+
+- keyv@4.5.4 (poisoned: 6.0.0)
+- flat-cache@4.0.1 (poisoned: 6.1.24)
+- file-entry-cache@8.0.0 (poisoned: 11.1.6)
+
+**Do not run `npm install`, `npm update`, or `npm ci` in `tools/ui` without first checking whether the compromised versions have been pulled from npm or patched.** A blind update will pull the poisoned tarballs, which contain a credential-stealing dropper (`setup.mjs` / `Math_Symbol.js`) that executes on install and harvests npm tokens, GitHub CLI tokens, AWS keys, and Vault tokens.
+
+Reference: https://www.aikido.dev/blog/keyv-and-friends-compromised-in-npm-supply-chain-attack

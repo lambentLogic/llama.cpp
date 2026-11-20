@@ -42,7 +42,7 @@ def main():
     ids = tok(text, return_tensors="pt").input_ids
     print(f"document tokens: {ids.shape[1]}", file=sys.stderr)
 
-    model = AutoModelForCausalLM.from_pretrained(args.hf_dir, dtype=torch.float32, device_map="cpu")
+    model = AutoModelForCausalLM.from_pretrained(args.hf_dir, dtype="float32", device_map="cpu")
     model.eval()
     with torch.no_grad():
         pkv = model(input_ids=ids, use_cache=True).past_key_values
