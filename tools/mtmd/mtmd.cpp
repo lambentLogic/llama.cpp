@@ -23,6 +23,8 @@
 #include <cstring>
 #include <climits>
 #include <vector>
+#include <sstream>
+#include <string>
 
 // represents raw image data, layout is RGBRGBRGB...
 // length of data must be nx * ny * 3
@@ -807,6 +809,60 @@ struct mtmd_tokenizer {
                 LOG_ERR("Unable to preprocess image\n");
                 return 2;
             }
+
+            // --- probe hook: replace preprocessed pixels with a raw f32 file ---
+            // MTMD_RAW_F32=<path to little-endian f32, one entry per batch tile,
+            // each nx*ny*3 in RGBRGB... layout matching clip_image_f32>.
+            // Runs AFTER preprocessing, so resize/tiling/normalization geometry is
+            // untouched; only the values change. This is the seam that lets
+            // out-of-gamut (>1) and negative pixel values reach encoder-style
+            // projectors (e.g. gemma4v), which mtmd's uint8 ingest cannot express.
+            if (const char * raw_env = getenv("MTMD_RAW_F32")) {
+                // colon-separated list: one path per image in the request, in
+                // order, cycling. Lets a multi-image request carry a different
+                // stimulus per image (e.g. pairwise preference tests).
+                static std::vector<std::string> raw_paths;
+                static size_t raw_idx = 0;
+                if (raw_paths.empty()) {
+                    std::string all(raw_env), cur;
+                    std::stringstream ss(all);
+                    while (std::getline(ss, cur, ':')) if (!cur.empty()) raw_paths.push_back(cur);
+                }
+                const char * raw = raw_paths[raw_idx % raw_paths.size()].c_str();
+                raw_idx++;
+                size_t want = 0;
+                for (auto & ent : batch_f32.entries) want += ent->buf.size();
+                want *= sizeof(float);
+                FILE * f = fopen(raw, "rb");
+                if (!f) {
+                    LOG_ERR("MTMD_RAW_F32: cannot open %s\n", raw);
+                    return 2;
+                }
+                fseek(f, 0, SEEK_END);
+                const size_t got = (size_t) ftell(f);
+                fseek(f, 0, SEEK_SET);
+                if (got != want) {
+                    LOG_ERR("MTMD_RAW_F32: size mismatch: file %zu bytes, need %zu "
+                            "(%zu tile(s), first %d x %d x 3)\n",
+                            got, want, batch_f32.entries.size(),
+                            batch_f32.entries.empty() ? 0 : batch_f32.entries[0]->nx,
+                            batch_f32.entries.empty() ? 0 : batch_f32.entries[0]->ny);
+                    fclose(f);
+                    return 2;
+                }
+                for (auto & ent : batch_f32.entries) {
+                    const size_t n = ent->buf.size() * sizeof(float);
+                    if (fread(ent->buf.data(), 1, n, f) != n) {
+                        LOG_ERR("MTMD_RAW_F32: short read from %s\n", raw);
+                        fclose(f);
+                        return 2;
+                    }
+                }
+                fclose(f);
+                LOG_INF("MTMD_RAW_F32: replaced %zu tile(s) from %s\n",
+                        batch_f32.entries.size(), raw);
+            }
+            // --- end probe hook ---
 
             // handle llava-uhd style preprocessing
             const bool has_tiling_grid = batch_f32.grid_x > 0 && batch_f32.grid_y > 0;

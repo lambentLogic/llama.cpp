@@ -14,6 +14,8 @@
 #include <algorithm>
 #include <cinttypes>
 #include <vector>
+#include <cstdio>
+#include <cstdlib>
 
 //#define MTMD_AUDIO_DEBUG
 
@@ -373,6 +375,43 @@ int32_t mtmd_helper_eval_chunk_single(mtmd_context * ctx,
         LOG_INF("%s slice encoded in %" PRId64 " ms\n", name, ggml_time_ms() - t0);
 
         float * embd = mtmd_get_output_embd(ctx);
+
+        // --- probe hook: replace encoded embeddings with a precomputed f32 file ---
+        // MTMD_INJECT_EMBD=<path to raw little-endian f32, [n_tokens][n_embd_inp]>
+        // The carrier media still sets geometry (token count, positions); only the
+        // contents are overwritten. Size must match exactly or we abort loudly.
+        if (const char * inj = getenv("MTMD_INJECT_EMBD")) {
+            const size_t n_tok  = mtmd_input_chunk_get_n_tokens(chunk);
+            const size_t n_embd = (size_t) llama_model_n_embd_inp(llama_get_model(lctx));
+            const size_t want   = n_tok * n_embd * sizeof(float);
+            FILE * f = fopen(inj, "rb");
+            if (!f) {
+                LOG_ERR("MTMD_INJECT_EMBD: cannot open %s\n", inj);
+                llama_batch_free(text_batch);
+                return -1;
+            }
+            fseek(f, 0, SEEK_END);
+            const size_t got = (size_t) ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (got != want) {
+                LOG_ERR("MTMD_INJECT_EMBD: size mismatch: file %zu bytes, need %zu "
+                        "(%zu tokens x %zu embd x 4)\n", got, want, n_tok, n_embd);
+                fclose(f);
+                llama_batch_free(text_batch);
+                return -1;
+            }
+            if (fread(embd, 1, want, f) != want) {
+                LOG_ERR("MTMD_INJECT_EMBD: short read from %s\n", inj);
+                fclose(f);
+                llama_batch_free(text_batch);
+                return -1;
+            }
+            fclose(f);
+            LOG_INF("MTMD_INJECT_EMBD: injected %zu tokens x %zu embd from %s\n",
+                    n_tok, n_embd, inj);
+        }
+        // --- end probe hook ---
+
         ret = mtmd_helper_decode_image_chunk(ctx, lctx, chunk, embd, n_past, seq_id, n_batch, new_n_past);
         if (ret != 0) {
             LOG_ERR("failed to decode %s\n", name);
